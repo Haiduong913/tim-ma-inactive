@@ -51,9 +51,47 @@ def _search_read(model, domain, fields, limit=0, groupby=None):
     return models.execute_kw(DB, uid, PASSWORD, model, "search_read",
                              [domain], {"fields": fields, "limit": limit})
 
+@st.cache_resource
+def _load_mch():
+    cats = _search_read("product.category", [], ["id", "name", "complete_name"])
+    mch1 = {}
+    cat_to_mch1 = {}
+    for c in cats:
+        cname = c.get("complete_name", "")
+        parts = cname.split(" | ")
+        code = parts[0].strip() if parts else ""
+        # MCH1: code dài 4 ký tự số
+        root = parts[1] if len(parts) >= 2 else parts[0]
+        root_code = parts[0].strip()[:4]
+        if len(root_code) == 4 and root_code.isdigit():
+            top_code = root_code
+            top_name = None
+            for cc in cats:
+                cn = cc.get("complete_name", "")
+                if cn.startswith(top_code + " | ") and len(cn.split(" | ")[0].strip()) == 4:
+                    top_name = cn
+                    break
+            if top_code not in mch1:
+                mch1[top_code] = top_name or top_code
+            cat_to_mch1[c["id"]] = top_code
+    return mch1, cat_to_mch1
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 🗓 Đến ngày")
+    # MCH filter
+    st.markdown("### 🏷 Ngành hàng (MCH1)")
+    mch1_dict, cat_to_mch1 = _load_mch()
+    mch1_options = sorted(mch1_dict.keys())
+    mch1_labels  = {k: mch1_dict[k] for k in mch1_options}
+    sel_mch1 = st.multiselect(
+        "Chọn MCH1",
+        options=mch1_options,
+        format_func=lambda k: mch1_dict.get(k, k),
+        label_visibility="collapsed",
+    )
+
+    st.divider()
+    st.markdown("### 🗓 Tồn kho đến ngày")
     bc_to = st.date_input("", dt.date.today(), format="DD/MM/YYYY", label_visibility="collapsed")
 
     st.divider()
@@ -64,7 +102,7 @@ with st.sidebar:
     if f_khong_ban:
         n_ban = int(st.number_input("ngày (bán)", min_value=1, max_value=3650, value=60, step=1, label_visibility="collapsed", key="n_ban"))
 
-    f_khong_ton = st.checkbox("Không phát sinh tồn kho", value=True)
+    f_khong_ton = st.checkbox("Tồn 0", value=True)
 
     f_khong_nhap = st.checkbox("Không phát sinh nhập trong", value=True)
     n_nhap = 0
@@ -94,11 +132,16 @@ if load:
     st.session_state.pop("_data", None)
     st.session_state["_loaded"] = True
 
-# Tính ngày bắt đầu cho từng filter
 def _from(n_days):
     return (bc_to - dt.timedelta(days=n_days - 1)).isoformat()
 
 _to_str = bc_to.isoformat()
+
+# Tính tập product_id theo MCH đã chọn
+def _mch_filter_ids(sel, c2m, all_ids):
+    if not sel:
+        return None  # không lọc
+    return {pid for pid in all_ids if c2m.get(pid) in set(sel)}
 
 if "_data" not in st.session_state:
     with st.spinner("Đang truy vấn Odoo… (1–2 phút)"):
@@ -106,10 +149,11 @@ if "_data" not in st.session_state:
         # Toàn bộ mã
         all_prods = _search_read("product.product",
                                   [["active", "in", [True, False]]],
-                                  ["id", "active", "create_date"])
+                                  ["id", "active", "create_date", "categ_id"])
         all_ids      = set(p["id"] for p in all_prods)
         inactive_ids = set(p["id"] for p in all_prods if not p["active"])
         create_date  = {p["id"]: (p.get("create_date") or "")[:10] for p in all_prods}
+        prod_categ   = {p["id"]: p["categ_id"][0] if p.get("categ_id") else None for p in all_prods}
 
         # Tồn kho hiện tại
         quants = _search_read("stock.quant",
@@ -156,6 +200,7 @@ if "_data" not in st.session_state:
             "all_ids": all_ids,
             "inactive_ids": inactive_ids,
             "create_date": create_date,
+            "prod_categ": prod_categ,
             "stock": stock, "zero_stock": zero_stock,
             "sold": sold, "imported": imported,
             "n_ban": n_ban, "n_nhap": n_nhap,
@@ -163,8 +208,15 @@ if "_data" not in st.session_state:
 
 d = st.session_state["_data"]
 
+# ── Áp MCH filter ─────────────────────────────────────────────────────────────
+pid_categ_to_mch1 = {pid: cat_to_mch1.get(cid) for pid, cid in d["prod_categ"].items()}
+if sel_mch1:
+    base = {pid for pid in d["all_ids"] if pid_categ_to_mch1.get(pid) in set(sel_mch1)}
+else:
+    base = set(d["all_ids"])
+
 # ── Áp điều kiện lọc ─────────────────────────────────────────────────────────
-candidate = set(d["all_ids"]) if f_tat_ca else d["all_ids"] - d["inactive_ids"]
+candidate = base if f_tat_ca else base - d["inactive_ids"]
 
 if f_khong_ban:   candidate -= d["sold"]
 if f_khong_ton:   candidate &= d["zero_stock"]
@@ -173,11 +225,11 @@ if f_khong_moi and n_moi > 0:
     cutoff = _from(n_moi)
     candidate -= {pid for pid, cd in d["create_date"].items() if cd >= cutoff}
 
-# Caption hiển thị N ngày đã dùng khi tải
 n_ban_used  = d.get("n_ban", 60)
 n_nhap_used = d.get("n_nhap", 60)
+mch_label   = ", ".join(sel_mch1) if sel_mch1 else "Tất cả MCH"
 st.caption(
-    f"Đến ngày: **{bc_to:%d/%m/%Y}** · "
+    f"MCH: **{mch_label}** · Đến: **{bc_to:%d/%m/%Y}** · "
     f"Bán: **{n_ban_used} ngày** · Nhập: **{n_nhap_used} ngày** · "
     f"Kết quả: **{len(candidate):,} mã**"
 )
@@ -196,14 +248,16 @@ with st.spinner(f"Đang lấy thông tin {len(candidate):,} sản phẩm…"):
         chunk = pids[i:i+500]
         info = mdls.execute_kw(DB, uid, PASSWORD, "product.product", "search_read",
                                [[["id", "in", chunk], ["active", "in", [True, False]]]],
-                               {"fields": ["id", "display_name", "barcode", "active", "create_date"]})
+                               {"fields": ["id", "display_name", "barcode", "active", "categ_id"]})
         for p in info:
             if not p.get("barcode"):
                 continue
             pid = p["id"]
+            cid = p["categ_id"][0] if p.get("categ_id") else None
             rows.append({
                 "Mã vạch":      p["barcode"],
                 "Tên sản phẩm": p["display_name"],
+                "MCH1":         cat_to_mch1.get(cid, ""),
                 "Trạng thái":   "Inactive" if not p["active"] else "Active",
                 "Tồn kho":      round(d["stock"].get(pid, 0), 2),
                 "Có bán":       "✓" if pid in d["sold"]     else "",
@@ -211,9 +265,9 @@ with st.spinner(f"Đang lấy thông tin {len(candidate):,} sản phẩm…"):
                 "Ngày tạo":     d["create_date"].get(pid, ""),
             })
 
-df = pd.DataFrame(rows).sort_values(["Trạng thái", "Mã vạch"]).reset_index(drop=True)
+df = pd.DataFrame(rows).sort_values(["MCH1", "Trạng thái", "Mã vạch"]).reset_index(drop=True)
 
-st.dataframe(df, width="stretch", hide_index=True, height=600)
+st.dataframe(df, use_container_width=True, hide_index=True, height=600)
 
 st.download_button("⬇️ Tải Excel",
                    df.to_csv(index=False).encode("utf-8-sig"),
