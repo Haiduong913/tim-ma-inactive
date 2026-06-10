@@ -32,7 +32,7 @@ Báo cáo phân tích & tìm mã sản phẩm cần Inactive trên hệ thống 
 URL      = "https://app.tientho.com"
 DB       = "app_erp"
 USERNAME = "TT01803"
-PASSWORD = st.secrets.get("odoo_password", "hochoilientuc")
+PASSWORD = st.secrets["odoo_password"]
 
 @st.cache_resource
 def _uid():
