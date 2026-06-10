@@ -79,7 +79,7 @@ with st.sidebar:
     f_tat_ca = st.checkbox("Tất cả sản phẩm (Active + Inactive)", value=False)
 
     st.divider()
-    load = st.button("🚀 Tải dữ liệu", width="stretch", type="primary")
+    load = st.button("🚀 Tải dữ liệu", use_container_width=True, type="primary")
 
 st.title("📦 Tìm mã Inactive")
 
