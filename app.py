@@ -11,7 +11,7 @@ def _lan_ip():
         return "localhost"
 
 _LAN_LINK = f"http://{_lan_ip()}:8505"
-_EXT_LINK = "https://inactive.tientho.com"   # ← đổi link Cloudflare tại đây
+_EXT_LINK = "https://inactive.tientho.com"
 
 st.set_page_config(
     page_title="Tìm mã Inactive",
@@ -53,21 +53,30 @@ def _search_read(model, domain, fields, limit=0, groupby=None):
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 🗓 Kỳ báo cáo")
-    c1, c2 = st.columns(2)
-    bc_from = c1.date_input("Từ ngày", dt.date.today() - dt.timedelta(days=60), format="DD/MM/YYYY")
-    bc_to   = c2.date_input("Đến ngày", dt.date.today(), format="DD/MM/YYYY")
+    st.markdown("### 🗓 Đến ngày")
+    bc_to = st.date_input("", dt.date.today(), format="DD/MM/YYYY", label_visibility="collapsed")
 
     st.divider()
     st.markdown("### 🔎 Điều kiện lọc")
-    f_khong_ban  = st.checkbox("Không phát sinh bán trong kỳ", value=True)
-    f_khong_ton  = st.checkbox("Không phát sinh tồn trong kỳ", value=True)
-    f_khong_nhap = st.checkbox("Không phát sinh nhập trong kỳ", value=True)
-    f_khong_moi  = st.checkbox("Sản phẩm không tạo mới", value=True)
-    n_ngay_moi   = 0
+
+    f_khong_ban = st.checkbox("Không phát sinh bán trong", value=True)
+    n_ban = 0
+    if f_khong_ban:
+        n_ban = int(st.number_input("ngày (bán)", min_value=1, max_value=3650, value=60, step=1, label_visibility="collapsed", key="n_ban"))
+
+    f_khong_ton = st.checkbox("Không phát sinh tồn kho", value=True)
+
+    f_khong_nhap = st.checkbox("Không phát sinh nhập trong", value=True)
+    n_nhap = 0
+    if f_khong_nhap:
+        n_nhap = int(st.number_input("ngày (nhập)", min_value=1, max_value=3650, value=60, step=1, label_visibility="collapsed", key="n_nhap"))
+
+    f_khong_moi = st.checkbox("Sản phẩm không tạo mới trong", value=True)
+    n_moi = 0
     if f_khong_moi:
-        n_ngay_moi = st.number_input("Loại bỏ mã tạo trong N ngày gần nhất", min_value=1, max_value=3650, value=30, step=1)
-    f_tat_ca     = st.checkbox("Tất cả sản phẩm (Active + Inactive)", value=False)
+        n_moi = int(st.number_input("ngày (tạo mới)", min_value=1, max_value=3650, value=30, step=1, label_visibility="collapsed", key="n_moi"))
+
+    f_tat_ca = st.checkbox("Tất cả sản phẩm (Active + Inactive)", value=False)
 
     st.divider()
     load = st.button("🚀 Tải dữ liệu", width="stretch", type="primary")
@@ -75,7 +84,7 @@ with st.sidebar:
 st.title("📦 Tìm mã Inactive")
 
 if not st.session_state.get("_loaded"):
-    st.info("**Bước 1:** Chọn kỳ ngày và điều kiện lọc.\n\n**Bước 2:** Bấm 🚀 **Tải dữ liệu**.")
+    st.info("**Bước 1:** Chọn điều kiện lọc.\n\n**Bước 2:** Bấm 🚀 **Tải dữ liệu**.")
     if load:
         st.session_state["_loaded"] = True
         st.rerun()
@@ -85,13 +94,16 @@ if load:
     st.session_state.pop("_data", None)
     st.session_state["_loaded"] = True
 
-_from_str = bc_from.isoformat()
-_to_str   = bc_to.isoformat()
+# Tính ngày bắt đầu cho từng filter
+def _from(n_days):
+    return (bc_to - dt.timedelta(days=n_days - 1)).isoformat()
+
+_to_str = bc_to.isoformat()
 
 if "_data" not in st.session_state:
     with st.spinner("Đang truy vấn Odoo… (1–2 phút)"):
 
-        # Toàn bộ mã — cả Active lẫn Inactive (lưu create_date để lọc mã mới)
+        # Toàn bộ mã
         all_prods = _search_read("product.product",
                                   [["active", "in", [True, False]]],
                                   ["id", "active", "create_date"])
@@ -99,7 +111,7 @@ if "_data" not in st.session_state:
         inactive_ids = set(p["id"] for p in all_prods if not p["active"])
         create_date  = {p["id"]: (p.get("create_date") or "")[:10] for p in all_prods}
 
-        # Tồn kho
+        # Tồn kho hiện tại
         quants = _search_read("stock.quant",
                                [["location_id.usage", "=", "internal"]],
                                ["product_id", "quantity"])
@@ -109,29 +121,31 @@ if "_data" not in st.session_state:
             stock[pid] = stock.get(pid, 0) + q["quantity"]
         zero_stock = set(pid for pid in all_ids if round(stock.get(pid, 0), 4) == 0)
 
-        # Doanh thu — Invoice (read_group để tránh timeout)
+        # Doanh thu — Invoice
+        from_ban = _from(n_ban) if f_khong_ban and n_ban > 0 else _from(60)
         inv_g = _search_read("account.move.line",
                               [["move_id.move_type", "=", "out_invoice"],
                                ["move_id.state", "=", "posted"],
-                               ["move_id.invoice_date", ">=", _from_str],
+                               ["move_id.invoice_date", ">=", from_ban],
                                ["move_id.invoice_date", "<=", _to_str],
                                ["product_id", "!=", False]],
                               ["product_id"], groupby=["product_id"])
         sold = set(g["product_id"][0] for g in inv_g if g.get("product_id"))
 
-        # Doanh thu — POS (read_group)
+        # Doanh thu — POS
         pos_g = _search_read("pos.order.line",
                               [["order_id.state", "in", ["done", "invoiced"]],
-                               ["order_id.date_order", ">=", _from_str],
+                               ["order_id.date_order", ">=", from_ban],
                                ["order_id.date_order", "<=", _to_str],
                                ["product_id", "!=", False]],
                               ["product_id"], groupby=["product_id"])
         sold |= set(g["product_id"][0] for g in pos_g if g.get("product_id"))
 
         # Nhập kho
+        from_nhap = _from(n_nhap) if f_khong_nhap and n_nhap > 0 else _from(60)
         moves = _search_read("stock.move",
                               [["state", "=", "done"],
-                               ["date", ">=", _from_str + " 00:00:00"],
+                               ["date", ">=", from_nhap + " 00:00:00"],
                                ["date", "<=", _to_str   + " 23:59:59"],
                                ["location_dest_id.usage", "=", "internal"],
                                ["product_id", "!=", False]],
@@ -144,25 +158,29 @@ if "_data" not in st.session_state:
             "create_date": create_date,
             "stock": stock, "zero_stock": zero_stock,
             "sold": sold, "imported": imported,
+            "n_ban": n_ban, "n_nhap": n_nhap,
         }
 
 d = st.session_state["_data"]
 
 # ── Áp điều kiện lọc ─────────────────────────────────────────────────────────
-if f_tat_ca:
-    candidate = set(d["all_ids"])
-else:
-    candidate = d["all_ids"] - d["inactive_ids"]
+candidate = set(d["all_ids"]) if f_tat_ca else d["all_ids"] - d["inactive_ids"]
 
 if f_khong_ban:   candidate -= d["sold"]
 if f_khong_ton:   candidate &= d["zero_stock"]
 if f_khong_nhap:  candidate -= d["imported"]
-if f_khong_moi and n_ngay_moi > 0:
-    cutoff = (bc_to - dt.timedelta(days=n_ngay_moi - 1)).isoformat()
-    moi_trong_n = {pid for pid, cd in d["create_date"].items() if cd >= cutoff}
-    candidate -= moi_trong_n
+if f_khong_moi and n_moi > 0:
+    cutoff = _from(n_moi)
+    candidate -= {pid for pid, cd in d["create_date"].items() if cd >= cutoff}
 
-st.caption(f"Kỳ: **{bc_from:%d/%m/%Y} → {bc_to:%d/%m/%Y}** · Kết quả: **{len(candidate):,} mã**")
+# Caption hiển thị N ngày đã dùng khi tải
+n_ban_used  = d.get("n_ban", 60)
+n_nhap_used = d.get("n_nhap", 60)
+st.caption(
+    f"Đến ngày: **{bc_to:%d/%m/%Y}** · "
+    f"Bán: **{n_ban_used} ngày** · Nhập: **{n_nhap_used} ngày** · "
+    f"Kết quả: **{len(candidate):,} mã**"
+)
 
 if not candidate:
     st.warning("Không có mã nào khớp điều kiện đã chọn.")
@@ -188,9 +206,9 @@ with st.spinner(f"Đang lấy thông tin {len(candidate):,} sản phẩm…"):
                 "Tên sản phẩm": p["display_name"],
                 "Trạng thái":   "Inactive" if not p["active"] else "Active",
                 "Tồn kho":      round(d["stock"].get(pid, 0), 2),
-                "Có bán":   "✓" if pid in d["sold"]     else "",
-                "Có nhập":  "✓" if pid in d["imported"] else "",
-                "Ngày tạo": d["create_date"].get(pid, ""),
+                "Có bán":       "✓" if pid in d["sold"]     else "",
+                "Có nhập":      "✓" if pid in d["imported"] else "",
+                "Ngày tạo":     d["create_date"].get(pid, ""),
             })
 
 df = pd.DataFrame(rows).sort_values(["Trạng thái", "Mã vạch"]).reset_index(drop=True)
@@ -199,5 +217,5 @@ st.dataframe(df, width="stretch", hide_index=True, height=600)
 
 st.download_button("⬇️ Tải Excel",
                    df.to_csv(index=False).encode("utf-8-sig"),
-                   file_name=f"tim_ma_inactive_{bc_from:%Y%m%d}_{bc_to:%Y%m%d}.csv",
+                   file_name=f"tim_ma_inactive_{bc_to:%Y%m%d}.csv",
                    mime="text/csv")
